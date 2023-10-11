@@ -13,14 +13,29 @@ type Tx = UnboundedSender<Message>;
 type Handle<T> = Arc<Mutex<T>>;
 type PeerMap = Handle<HashMap<SocketAddr, Tx>>;
 
+// enum PhasmoMessage {
+//     JoinLobby,
+// }
+
+enum GameState {
+    Lobby { players: Vec<String> },
+}
+
+struct Player {
+    name: String,
+    addr: SocketAddr,
+}
+
 struct ServerState {
     peer_map: PeerMap,
+    players: Handle<Vec<Player>>,
 }
 
 impl ServerState {
     fn new() -> Self {
         ServerState {
             peer_map: Arc::new(Mutex::new(HashMap::new())),
+            players: Arc::new(Mutex::new(Vec::new()))
         }
     }
 
@@ -32,6 +47,35 @@ impl ServerState {
     fn remove_peer(&self, addr: SocketAddr) {
         let mut peer_map = self.peer_map.lock().unwrap();
         peer_map.remove(&addr).unwrap();
+    }
+
+    fn register_player(&self, addr: SocketAddr, name: &str) {
+        let mut players = self.players.lock().unwrap();
+        
+        if !players.iter().any(|p| p.addr == addr) {
+            let player = Player { name: name.to_owned(), addr };
+            players.push(player);
+        }
+    }
+
+    fn handle_message(&self, addr: SocketAddr, msg: Message) {
+        match msg {
+            Message::Text(msg) => {
+                let msgSplit: Vec<&str> = msg.split(' ').collect();
+                let cmd = msgSplit[0];
+
+                if cmd == "JoinLobby" {
+                    let name = msgSplit[1];
+                    self.register_player(addr, name); 
+                    self.broadcast(Message::text("new player joined"));
+                }
+            },
+            _ => ()
+        }
+    }
+
+    fn broadcast_gamestate(&self) {
+        
     }
 
     fn broadcast(&self, msg: Message) {
@@ -56,18 +100,18 @@ async fn handle_connection(state: Handle<ServerState>, raw_stream: TcpStream, ad
     
     let (outgoing, incoming) = ws_stream.split();
     
-    let broadcast_incoming = incoming.try_for_each(|msg| {
+    let handle_incoming = incoming.try_for_each(|msg| {
         println!("Received a message from {}: {}", addr, msg.to_text().unwrap());
 
-        state.lock().unwrap().broadcast(msg);
+        state.lock().unwrap().handle_message(addr, msg);
 
         future::ok(())
     });
 
     let receive_from_others = rx.map(Ok).forward(outgoing);
 
-    pin_mut!(broadcast_incoming, receive_from_others);
-    future::select(broadcast_incoming, receive_from_others).await;
+    pin_mut!(handle_incoming, receive_from_others);
+    future::select(handle_incoming, receive_from_others).await;
 
     println!("{} disconnected", &addr);
     state.lock().unwrap().remove_peer(addr);
