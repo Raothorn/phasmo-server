@@ -6,6 +6,7 @@ use std::{
 
 use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
+use serde::Serialize;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -13,10 +14,7 @@ type Tx = UnboundedSender<Message>;
 type Handle<T> = Arc<Mutex<T>>;
 type PeerMap = Handle<HashMap<SocketAddr, Tx>>;
 
-// enum PhasmoMessage {
-//     JoinLobby,
-// }
-
+#[derive(Serialize)]
 enum GameState {
     Lobby { players: Vec<String> },
 }
@@ -52,22 +50,33 @@ impl ServerState {
     fn register_player(&self, addr: SocketAddr, name: &str) {
         let mut players = self.players.lock().unwrap();
         
-        if !players.iter().any(|p| p.addr == addr) {
+        if players.iter().any(|p| p.addr == addr) {
+            println!("Player already in lobby");
+        } 
+        else if players.iter().any(|p| p.name == name) {
+            println!("Name already taken");
+        }
+        else {
+            println!("Adding player {} to lobby", name);
             let player = Player { name: name.to_owned(), addr };
             players.push(player);
+            drop(players);
+
+            println!("broadcasting");
+            self.broadcast_gamestate();
+            println!("FInished broadcasting");
         }
     }
 
     fn handle_message(&self, addr: SocketAddr, msg: Message) {
         match msg {
             Message::Text(msg) => {
-                let msgSplit: Vec<&str> = msg.split(' ').collect();
-                let cmd = msgSplit[0];
+                let msg_split: Vec<&str> = msg.split(' ').collect();
+                let cmd = msg_split[0];
 
                 if cmd == "JoinLobby" {
-                    let name = msgSplit[1];
+                    let name = msg_split[1];
                     self.register_player(addr, name); 
-                    self.broadcast(Message::text("new player joined"));
                 }
             },
             _ => ()
@@ -75,7 +84,14 @@ impl ServerState {
     }
 
     fn broadcast_gamestate(&self) {
-        
+        let players = self.players.lock().unwrap();
+        let player_names = players.iter().map(|p| p.name.clone()).collect();
+
+        let gamestate = GameState::Lobby { players: player_names };
+        let gamestate_ser = serde_json::to_string(&gamestate).unwrap();
+
+        let msg = Message::text(gamestate_ser);
+        self.broadcast(msg);
     }
 
     fn broadcast(&self, msg: Message) {

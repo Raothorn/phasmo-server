@@ -605,6 +605,8 @@ dependencies = [
  "futures-util",
  "log",
  "mini-redis",
+ "serde",
+ "serde_json",
  "tokio",
  "tokio-tungstenite",
 ]
