@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    error::Error,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
@@ -11,16 +10,18 @@ use native_tls::Identity;
 use serde::Serialize;
 // use tokio::prelude::*;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_native_tls::{TlsAcceptor, TlsStream};
-use tokio_tungstenite::tungstenite::{Message, Result};
+use tokio_native_tls::TlsAcceptor;
+use tokio_tungstenite::tungstenite::Message;
+
+use crate::sim::run_simulation;
 
 type Tx = UnboundedSender<Message>;
-type Handle<T> = Arc<Mutex<T>>;
+pub type Handle<T> = Arc<Mutex<T>>;
 type PeerMap = Handle<HashMap<SocketAddr, Tx>>;
 
 #[derive(Serialize)]
 enum GameState {
-    Lobby { players: Vec<String> },
+    Lobby { players: Vec<String>, val: u32 },
 }
 
 struct Player {
@@ -28,9 +29,10 @@ struct Player {
     addr: SocketAddr,
 }
 
-struct ServerState {
+pub struct ServerState {
     peer_map: PeerMap,
     players: Handle<Vec<Player>>,
+    sim: Handle<u32>
 }
 
 impl ServerState {
@@ -38,12 +40,19 @@ impl ServerState {
         ServerState {
             peer_map: Arc::new(Mutex::new(HashMap::new())),
             players: Arc::new(Mutex::new(Vec::new())),
+            sim: Arc::new(Mutex::new(0))
         }
     }
 
     fn add_peer(&self, addr: SocketAddr, tx: Tx) {
         let mut peer_map = self.peer_map.lock().unwrap();
         peer_map.insert(addr, tx);
+    }
+
+    // Temp
+    pub fn inc(&self) {
+        let mut sim = self.sim.lock().unwrap();
+        *sim += 1;
     }
 
     fn remove_peer(&self, addr: SocketAddr) {
@@ -92,8 +101,11 @@ impl ServerState {
         let players = self.players.lock().unwrap();
         let player_names = players.iter().map(|p| p.name.clone()).collect();
 
+        let val = *self.sim.lock().unwrap();
+
         let gamestate = GameState::Lobby {
             players: player_names,
+            val
         };
         let gamestate_ser = serde_json::to_string(&gamestate).unwrap();
 
@@ -162,11 +174,6 @@ async fn handle_connection(
     }
 }
 
-// pub fn accept_tls(acceptor: Handle<TlsAcceptor>, stream: TcpStream) -> TlsStream<TcpStream> {
-//     let acceptor = acceptor.lock().unwrap();
-//     acceptor.accept(stream)
-// }
-
 pub async fn run_server() {
     let addr = "192.168.1.199:2000";
 
@@ -185,10 +192,14 @@ pub async fn run_server() {
         native_acceptor,
     )));
 
+    let sim_state = state.clone();
+    tokio::spawn(run_simulation(sim_state));
+
     while let Ok((stream, addr)) = listener.accept().await {
         let state = state.clone();
         let tls_acceptor = tls_acceptor.clone();
 
         tokio::spawn(handle_connection(state, stream, tls_acceptor, addr));
     }
+
 }

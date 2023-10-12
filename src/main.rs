@@ -1,4 +1,5 @@
 mod server;
+mod sim;
 
 #[tokio::main]
 async fn main() {
