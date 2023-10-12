@@ -1,14 +1,18 @@
 use std::{
     collections::HashMap,
+    error::Error,
     net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
 use futures_channel::mpsc::{unbounded, UnboundedSender};
 use futures_util::{future, pin_mut, stream::TryStreamExt, StreamExt};
+use native_tls::Identity;
 use serde::Serialize;
+// use tokio::prelude::*;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_native_tls::{TlsAcceptor, TlsStream};
+use tokio_tungstenite::tungstenite::{Message, Result};
 
 type Tx = UnboundedSender<Message>;
 type Handle<T> = Arc<Mutex<T>>;
@@ -33,7 +37,7 @@ impl ServerState {
     fn new() -> Self {
         ServerState {
             peer_map: Arc::new(Mutex::new(HashMap::new())),
-            players: Arc::new(Mutex::new(Vec::new()))
+            players: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -49,16 +53,17 @@ impl ServerState {
 
     fn register_player(&self, addr: SocketAddr, name: &str) {
         let mut players = self.players.lock().unwrap();
-        
+
         if players.iter().any(|p| p.addr == addr) {
             println!("Player already in lobby");
-        } 
-        else if players.iter().any(|p| p.name == name) {
+        } else if players.iter().any(|p| p.name == name) {
             println!("Name already taken");
-        }
-        else {
+        } else {
             println!("Adding player {} to lobby", name);
-            let player = Player { name: name.to_owned(), addr };
+            let player = Player {
+                name: name.to_owned(),
+                addr,
+            };
             players.push(player);
             drop(players);
 
@@ -76,10 +81,10 @@ impl ServerState {
 
                 if cmd == "JoinLobby" {
                     let name = msg_split[1];
-                    self.register_player(addr, name); 
+                    self.register_player(addr, name);
                 }
-            },
-            _ => ()
+            }
+            _ => (),
         }
     }
 
@@ -87,7 +92,9 @@ impl ServerState {
         let players = self.players.lock().unwrap();
         let player_names = players.iter().map(|p| p.name.clone()).collect();
 
-        let gamestate = GameState::Lobby { players: player_names };
+        let gamestate = GameState::Lobby {
+            players: player_names,
+        };
         let gamestate_ser = serde_json::to_string(&gamestate).unwrap();
 
         let msg = Message::text(gamestate_ser);
@@ -102,36 +109,63 @@ impl ServerState {
     }
 }
 
-async fn handle_connection(state: Handle<ServerState>, raw_stream: TcpStream, addr: SocketAddr) {
+async fn handle_connection(
+    state: Handle<ServerState>,
+    raw_stream: TcpStream,
+    acceptor: Arc<tokio::sync::Mutex<TlsAcceptor>>,
+    addr: SocketAddr,
+) {
     println!("Incoming TCP connection from: {}", addr);
 
-    let ws_stream = tokio_tungstenite::accept_async(raw_stream)
-        .await
-        .expect("Error during the websocket handshake occurred");
-    println!("WebSocket connection established: {}", addr);
 
-    // Insert the write part of this peer to the peer map.
-    let (tx, rx) = unbounded();
-    state.lock().unwrap().add_peer(addr, tx);
-    
-    let (outgoing, incoming) = ws_stream.split();
-    
-    let handle_incoming = incoming.try_for_each(|msg| {
-        println!("Received a message from {}: {}", addr, msg.to_text().unwrap());
+    let acceptor = acceptor.lock().await;
+    let stream = acceptor.accept(raw_stream).await;
+    drop(acceptor);
 
-        state.lock().unwrap().handle_message(addr, msg);
+    match stream {
+        Ok(stream) => {
+            let ws_stream = tokio_tungstenite::accept_async(stream).await;
+            match ws_stream {
+                Ok(ws_stream) => {
+                    println!("WebSocket connection established: {}", addr);
 
-        future::ok(())
-    });
+                    // Insert the write part of this peer to the peer map.
+                    let (tx, rx) = unbounded();
+                    state.lock().unwrap().add_peer(addr, tx);
 
-    let receive_from_others = rx.map(Ok).forward(outgoing);
+                    let (outgoing, incoming) = ws_stream.split();
 
-    pin_mut!(handle_incoming, receive_from_others);
-    future::select(handle_incoming, receive_from_others).await;
+                    let handle_incoming = incoming.try_for_each(|msg| {
+                        println!(
+                            "Received a message from {}: {}",
+                            addr,
+                            msg.to_text().unwrap()
+                        );
 
-    println!("{} disconnected", &addr);
-    state.lock().unwrap().remove_peer(addr);
+                        state.lock().unwrap().handle_message(addr, msg);
+
+                        future::ok(())
+                    });
+
+                    let receive_from_others = rx.map(Ok).forward(outgoing);
+
+                    pin_mut!(handle_incoming, receive_from_others);
+                    future::select(handle_incoming, receive_from_others).await;
+
+                    println!("{} disconnected", &addr);
+                    state.lock().unwrap().remove_peer(addr);
+                }
+                Err(e) => println!("{}", e),
+            }
+        }
+        Err(e) => println!("{}", e),
+    }
 }
+
+// pub fn accept_tls(acceptor: Handle<TlsAcceptor>, stream: TcpStream) -> TlsStream<TcpStream> {
+//     let acceptor = acceptor.lock().unwrap();
+//     acceptor.accept(stream)
+// }
 
 pub async fn run_server() {
     let addr = "192.168.1.199:2000";
@@ -143,7 +177,18 @@ pub async fn run_server() {
     let listener = try_socket.expect("Failed to bind");
     println!("Listening on: {}", addr);
 
+    // TLS
+    let der = include_bytes!("secrets/keyStore.p12");
+    let cert = Identity::from_pkcs12(der, "pass").unwrap();
+    let native_acceptor = native_tls::TlsAcceptor::builder(cert).build().unwrap();
+    let tls_acceptor = Arc::new(tokio::sync::Mutex::new(tokio_native_tls::TlsAcceptor::from(
+        native_acceptor,
+    )));
+
     while let Ok((stream, addr)) = listener.accept().await {
-        tokio::spawn(handle_connection(state.clone(), stream, addr));
+        let state = state.clone();
+        let tls_acceptor = tls_acceptor.clone();
+
+        tokio::spawn(handle_connection(state, stream, tls_acceptor, addr));
     }
 }
