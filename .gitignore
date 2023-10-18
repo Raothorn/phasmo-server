@@ -1,1 +1,4 @@
 /target
+/scripts/lib
+/scripts/bin
+/src/secrets
