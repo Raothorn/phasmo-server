@@ -1,10 +1,10 @@
 use std::{io, sync::Arc};
-use lazy_static;
 
 mod server;
 mod sim;
 mod map;
 mod ghost;
+mod utils;
 
 #[tokio::main]
 async fn main() {

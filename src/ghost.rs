@@ -41,7 +41,10 @@ impl Ghost {
     }
 
     pub fn has_evidence_type(&self, evidence: EvidenceType) -> bool {
-        return true;
+        match evidence {
+            EvidenceType::Emf => false,
+            _ => true,
+        }
     }
 
     fn next_target(&self, map: &Map) -> RoomLabel {

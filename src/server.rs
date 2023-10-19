@@ -246,7 +246,7 @@ pub async fn run_server<'a>(rx: Arc<tokio::sync::Mutex<Receiver<()>>>) {
 pub async fn run_simulation(
     state: Handle<ServerState>
 ) {
-    let fps = 30;
+    let fps = 10;
     let dt = Duration::from_millis(1000 / fps);
     loop {
         if state.lock().unwrap().is_started() {
